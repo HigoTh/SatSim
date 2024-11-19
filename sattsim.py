@@ -28,6 +28,29 @@ def latlong2azel( lat, long ):
     el_rad = -lat + (np.pi/2)
     return az_rad, el_rad
 
+def cart_2_sph( xyz ):
+    
+    # Spherical matrix
+    sph = np.zeros(xyz.shape)
+    xy = xyz[:,0]**2 + xyz[:,1]**2
+    # Radius
+    sph[:,0] = np.sqrt(xy + xyz[:,2]**2)
+    # Elevation
+    sph[:,1] = np.arctan2( np.sqrt(xy), xyz[:,2] )
+    # Azimuth
+    sph[:,2] = np.arctan2(xyz[:,1], xyz[:,0])
+    return sph
+
+def cart_2_ll( xyz ):
+    
+    # Spherical matrix
+    sph = np.zeros([max(xyz.shape),2])
+    xy = xyz[:,0]**2 + xyz[:,1]**2
+    # Latitude
+    sph[:,0] = -np.arctan2( np.sqrt(xy), xyz[:,2] ) + (np.pi/2)
+    # Longitude
+    sph[:,1] = np.arctan2(xyz[:,1], xyz[:,0])
+    return sph
 
 def draw_map(m, scale=0.2):
     # draw a shaded-relief image
@@ -126,11 +149,11 @@ class Earth:
     def __init__(self) -> None:
 
         # Earth reference sphere
-        self.sphere = ge.Sphere( ge.Point( [ 0,0,0 ] ), self.earth_rad )
+        self.sphere = ge.Sphere( ge.Point( 0,0,0 ), self.earth_rad )
         # Earth reference vectorial basis
         self.vec_basis = self._get_vec_basis()
         # Coverage zones
-        self.coverage_zones = []
+        self.coverage_zones = {}
 
     def _get_vec_basis( self ):
         """Creates the earth's reference vector base."""
@@ -142,6 +165,88 @@ class Earth:
         # Get vector basis
         vec_basis = ge.VectorBasis( x, y, z )
         return vec_basis
+
+    def _get_rotation_mat( self, angle: float ):
+        """ Compute the rotation matrix.
+        Args:
+            angle (float): Angle of rotation around z axis.
+
+        Returns:
+            array: Rotation matrix.
+        """
+
+        # Rotation matrix
+        r_1 = [ np.cos( angle ), -np.sin( angle ), 0 ]
+        r_2 = [ np.sin( angle ), np.cos( angle ), 0 ]
+        r_3 = [ 0, 0, 1 ]
+        rot_mat = np.array( [ r_1, r_2, r_3] )
+        return rot_mat
+
+    def update_position( self, t: float ):
+
+        # Get rotation matrix
+        rot_matrix = self._get_rotation_mat( self.angular_rate * t )
+        # Rotate base vectors
+        x = ge.Vector( np.matmul( rot_matrix, self.vec_basis.v1.asarray() ) )
+        y = ge.Vector( np.matmul( rot_matrix, self.vec_basis.v2.asarray() ) )
+        z = self.vec_basis.v3
+        self.vec_basis = ge.VectorBasis( x, y, z )
+        
+        # Rotate points on surface
+    
+        return
+
+    def plot_earth( self, vecs_exag = 10000, return_fig = False ):
+        """ Plots satellite position, base vector, pointing vector and terrestrial sphere.
+        Returns:
+            Object of the plotted figure.
+        """
+
+        fig = plt.figure(figsize=(10,10), dpi=80)
+        
+        ax = fig.add_subplot(111, projection='3d')
+        # Make data
+        r = PhyConstants.EARTH_RAD_KM.value
+        u = np.linspace(0, 2 * np.pi, 100)
+        v = np.linspace(0, np.pi, 100)
+        x = r * np.outer(np.cos(u), np.sin(v))
+        y = r * np.outer(np.sin(u), np.sin(v))
+        z = r * np.outer(np.ones(np.size(u)), np.cos(v))
+        # Plot the surface
+        ax.plot_surface(x, y, z, color='linen', alpha=0.5)
+        # plot circular curves over the surface
+        theta = np.linspace(0, 2 * np.pi, 100)
+        z = np.zeros(100)
+        x = r * np.sin(theta)
+        y = r * np.cos(theta)
+
+        ax.plot(x, y, z, color='black', alpha=0.75)
+        ax.plot(z, x, y, color='black', alpha=0.75)
+
+        ## add axis lines
+        zeros = np.zeros(1000)
+        line = np.linspace(-r,r,1000)
+
+        ax.plot(line, zeros, zeros, color='black', alpha=0.75)
+        ax.plot(zeros, line, zeros, color='black', alpha=0.75)
+        ax.plot(zeros, zeros, line, color='black', alpha=0.75)
+
+        # Plot vector basis
+        r = vecs_exag
+        origin = [0,0,0]
+        ax.quiver( *origin, r * self.vec_basis.v1.dx, r * self.vec_basis.v1.dy, r * self.vec_basis.v1.dz, color='blue')
+        ax.quiver( *origin, r * self.vec_basis.v2.dx, r * self.vec_basis.v2.dy, r * self.vec_basis.v2.dz, color='red')
+        ax.quiver( *origin, r * self.vec_basis.v3.dx, r * self.vec_basis.v3.dy, r * self.vec_basis.v3.dz, color='black')
+        
+        ax.set_zlim(-PhyConstants.GEO_ORBIT_RAD_KM.value / 2, PhyConstants.GEO_ORBIT_RAD_KM.value / 2)
+        ax.set_ylim(-PhyConstants.GEO_ORBIT_RAD_KM.value / 2, PhyConstants.GEO_ORBIT_RAD_KM.value / 2)
+        ax.set_xlim(-PhyConstants.GEO_ORBIT_RAD_KM.value / 2, PhyConstants.GEO_ORBIT_RAD_KM.value / 2)
+
+        ret = fig if return_fig else None
+        
+        plt.show()
+
+        return ret
 
 
 class SatAntenna:
@@ -206,6 +311,7 @@ class SatAntenna:
         """String representation with class included"""
         return "SatAntenna" + str(self)
 
+
 class GeoSatellite:
     """Geostationary satellite class.
     """
@@ -215,7 +321,7 @@ class GeoSatellite:
     # Geostationary satellite orbit radius
     orbit_rad = PhyConstants.GEO_ORBIT_RAD_KM.value
 
-    def __init__(self, init_az: float, lat_long_target_position: List[float], ant_hpbw: float ) -> None:
+    def __init__(self, sat_name: str, init_az: float, lat_long_target_position: List[float], ant_hpbw: float ) -> None:
 
         """Initializing a geo satellite instance.
         Args:
@@ -224,7 +330,7 @@ class GeoSatellite:
                 on the Earth's surface where the satellite beam is oriented in the initial instant.
             ant_hpbw: HPBW of satellite antenna.
         """
-
+        self.name = sat_name
         # Initial states
         self.initial_sph_el_az = [np.pi/2, init_az] # Elevation-azimuth coordinates
         self.initial_lat_long = azel2latlong( self.initial_sph_el_az[1], self.initial_sph_el_az[0] ) # Lat-Long coordinates
@@ -577,11 +683,71 @@ class NGeoSatellite:
 
 class System:
 
-    def __init__(self, earth_stations_net: List[EarthStation], geo_sat_net: List[GeoSatellite], ngeo_sat_net: List[NGeoSatellite] ) -> None:
-        
-        self.earth_station_net = earth_stations_net
-        self.geo_sat_net = geo_sat_net
+    def __init__(self, earth: Earth, earth_stations_net: List[EarthStation], geo_sat_net: List[GeoSatellite], ngeo_sat_net: List[NGeoSatellite] ) -> None:
+
+        self.earth = earth # Earth reference
+        self.earth_station_net = earth_stations_net 
+        self.geo_sat_net = geo_sat_net # Geo satellites list
         self.ngeo_sat_net = ngeo_sat_net
+        self.time = [0]
+        self.coverage_zones = [self.compute_coverage_zones()]
+
+    def compute_coverage_zones( self ):
+        """ Calculates the areas covered by satellites.
+        Returns:
+            dict: Dictionary with the relationships between the satellite 
+            and the demarcation of coverage areas.
+        """
+
+        # Dictionary with the relationship between satellite and coverage area on Earth
+        sat_cov_dict = {}
+        # Interaction on Geo satellites
+        for geo_sat in self.geo_sat_net:
+
+            aux_list = []
+            # Ray origin
+            ray_origin = ge.Point( *geo_sat.current_cart )
+
+            # El-Az angles of the cone
+            el = geo_sat.antenna.hpbw_rad
+            azv = np.linspace( 0, 2 * np.pi, 100 )
+            for az in azv:
+
+                cart_p = sph2cart(1.0, el, az)
+                ray_dir_vector = cart_p[ 0 ] * geo_sat.antenna.vec_basis.v1 + \
+                    cart_p[ 1 ] * geo_sat.antenna.vec_basis.v2 + \
+                    cart_p[ 2 ] * geo_sat.antenna.vec_basis.v3
+                # Ray
+                ray = ge.Ray( ray_origin, ray_dir_vector )
+                # Intersection point
+                intersection_point = self.earth.sphere.intersect( ray )
+                if intersection_point is not None:
+                    aux_list.append( intersection_point.asarray() )
+
+            sat_cov_dict[ geo_sat.name ] = np.array( aux_list )
+
+        return sat_cov_dict
+
+    def plot_current_coverage_zone( self, sat_name: str ):
+
+        # Plot earth basemap
+        fig = plt.figure(figsize=(12, 10), edgecolor='w')
+        m = Basemap(projection='cyl', resolution=None, llcrnrlat=-90, urcrnrlat=90, llcrnrlon=-180, urcrnrlon=180, )
+        draw_map(m)
+
+        # Get the last coverage zones map
+        current_time_cov_dict = self.coverage_zones[-1]
+        if sat_name in current_time_cov_dict:
+            
+            ll_cov_zone = cart_2_ll( current_time_cov_dict[ sat_name ] )
+            m.plot( np.rad2deg( ll_cov_zone[ :, 1 ] ), np.rad2deg( ll_cov_zone[ :, 0 ] ), latlon=True, linestyle='--', label=sat_name, color='red', linewidth=3 )    
+
+        plt.legend()
+        plt.show()
+
+        return
+
+
 
     def update_system( self, dt: float ):
 
