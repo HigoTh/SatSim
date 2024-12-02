@@ -7,7 +7,7 @@ from scipy.optimize import fsolve
 import geom as ge
 from mpl_toolkits.basemap import Basemap
 from itertools import chain
-
+from matplotlib.patches import Polygon
 
 
 # -----------------------------------------------------------------------------
@@ -47,9 +47,9 @@ def cart_2_ll( xyz ):
     sph = np.zeros([max(xyz.shape),2])
     xy = xyz[:,0]**2 + xyz[:,1]**2
     # Latitude
-    sph[:,0] = -np.arctan2( np.sqrt(xy), xyz[:,2] ) + (np.pi/2)
+    sph[:,1] = -np.arctan2( np.sqrt(xy), xyz[:,2] ) + (np.pi/2)
     # Longitude
-    sph[:,1] = np.arctan2(xyz[:,1], xyz[:,0])
+    sph[:,0] = np.arctan2(xyz[:,1], xyz[:,0])
     return sph
 
 def draw_map(m, scale=0.2):
@@ -299,6 +299,7 @@ class SatAntenna:
         r_u = ge.Vector( beam_dir_vector ).norm()
         v_u = ge.Vector( [ -r_u.dy, r_u.dx, 0.0 ] ).norm()
         t_u = r_u.cross( v_u ).norm()
+
         # Get vector basis
         vec_basis = ge.VectorBasis( t_u, v_u, r_u )
         return vec_basis
@@ -379,11 +380,13 @@ class GeoSatellite:
             beam_vector_be (Vector): beam direction vector (Earth vector basis)
         """
         az, el = latlong2azel( lat_lon_target_position[0], lat_lon_target_position[1] )
+
         # Target point of earth surface
         earth_surface_pos = sph2cart( PhyConstants.EARTH_RAD_KM.value, el, az)
-
+        
         # Beam vector on earth basis
         beam_vector_be = (ge.Vector( earth_surface_pos ) - ge.Vector( self.current_cart )).norm()
+
         return beam_vector_be
 
     def _get_beam_vector_bs( self ):
@@ -683,15 +686,24 @@ class NGeoSatellite:
 
 class System:
 
-    def __init__(self, earth: Earth, earth_stations_net: List[EarthStation], geo_sat_net: List[GeoSatellite], ngeo_sat_net: List[NGeoSatellite] ) -> None:
+    # Angular resolution of rays in the elevation domain
+    cone_el_angle_resol = np.pi / 1000.0
+
+    def __init__(self, 
+                 earth: Earth, 
+                 earth_stations_net: List[EarthStation], 
+                 geo_sat_net: List[GeoSatellite], 
+                 ngeo_sat_net: List[NGeoSatellite], 
+                 cone_aperture: float = 1.0 ) -> None:
 
         self.earth = earth # Earth reference
         self.earth_station_net = earth_stations_net 
-        self.geo_sat_net = geo_sat_net # Geo satellites list
+        self.geo_sat_net = { geo_sat.name: geo_sat for geo_sat in geo_sat_net } # Geo satellites list
         self.ngeo_sat_net = ngeo_sat_net
         self.time = [0]
+        self.cone_aperture = cone_aperture
         self.coverage_zones = [self.compute_coverage_zones()]
-
+        
     def compute_coverage_zones( self ):
         """ Calculates the areas covered by satellites.
         Returns:
@@ -702,27 +714,30 @@ class System:
         # Dictionary with the relationship between satellite and coverage area on Earth
         sat_cov_dict = {}
         # Interaction on Geo satellites
-        for geo_sat in self.geo_sat_net:
+        for geo_sat_name, geo_sat in self.geo_sat_net.items():
 
             aux_list = []
             # Ray origin
             ray_origin = ge.Point( *geo_sat.current_cart )
 
             # El-Az angles of the cone
-            el = geo_sat.antenna.hpbw_rad
-            azv = np.linspace( 0, 2 * np.pi, 100 )
+            max_cone_aperture = self.cone_aperture * geo_sat.antenna.hpbw_rad
+            azv = np.linspace( -np.pi, np.pi, 100 )
+            elv = np.linspace( max_cone_aperture, 0, 100 )
             for az in azv:
+                for el in elv:
 
-                cart_p = sph2cart(1.0, el, az)
-                ray_dir_vector = cart_p[ 0 ] * geo_sat.antenna.vec_basis.v1 + \
-                    cart_p[ 1 ] * geo_sat.antenna.vec_basis.v2 + \
-                    cart_p[ 2 ] * geo_sat.antenna.vec_basis.v3
-                # Ray
-                ray = ge.Ray( ray_origin, ray_dir_vector )
-                # Intersection point
-                intersection_point = self.earth.sphere.intersect( ray )
-                if intersection_point is not None:
-                    aux_list.append( intersection_point.asarray() )
+                    cart_p = sph2cart(1.0, el, az)
+                    ray_dir_vector = cart_p[ 0 ] * geo_sat.antenna.vec_basis.v1 + \
+                        cart_p[ 1 ] * geo_sat.antenna.vec_basis.v2 + \
+                        cart_p[ 2 ] * geo_sat.antenna.vec_basis.v3
+                    # Ray
+                    ray = ge.Ray( ray_origin, ray_dir_vector )
+                    # Intersection point
+                    intersection_point = self.earth.sphere.intersect( ray )
+                    if intersection_point is not None:
+                        aux_list.append( intersection_point.asarray() )
+                        break
 
             sat_cov_dict[ geo_sat.name ] = np.array( aux_list )
 
@@ -732,15 +747,22 @@ class System:
 
         # Plot earth basemap
         fig = plt.figure(figsize=(12, 10), edgecolor='w')
-        m = Basemap(projection='cyl', resolution=None, llcrnrlat=-90, urcrnrlat=90, llcrnrlon=-180, urcrnrlon=180, )
-        draw_map(m)
+        basemap = Basemap(projection='cyl', resolution=None, llcrnrlat=-90, urcrnrlat=90, llcrnrlon=-180, urcrnrlon=180, )
+        draw_map( basemap )
 
         # Get the last coverage zones map
         current_time_cov_dict = self.coverage_zones[-1]
         if sat_name in current_time_cov_dict:
             
-            ll_cov_zone = cart_2_ll( current_time_cov_dict[ sat_name ] )
-            m.plot( np.rad2deg( ll_cov_zone[ :, 1 ] ), np.rad2deg( ll_cov_zone[ :, 0 ] ), latlon=True, linestyle='--', label=sat_name, color='red', linewidth=3 )    
+            # Coverage zone
+            ll_cov_zone = np.rad2deg( cart_2_ll( current_time_cov_dict[ sat_name ] ) )
+            # Coverage zone polygon
+            poly = Polygon( ll_cov_zone, facecolor='red', alpha=0.4 )
+            plt.gca().add_patch(poly)
+            # Plot coverage zone contour
+            basemap.plot( ll_cov_zone[ :, 0 ], ll_cov_zone[ :, 1 ], latlon=True, linestyle='--', label=sat_name, color='red', linewidth=1.5 )
+            # Title
+            plt.title( f'Zona de cobertura - {sat_name}, Abertura: {self.cone_aperture} x {self.geo_sat_net[ sat_name ].antenna.hpbw_dg }°' )
 
         plt.legend()
         plt.show()
