@@ -157,7 +157,7 @@ class Vector(object):
 
     def __repr__(self):
         """String representation with class included"""
-        return "Vector3" + str(self)
+        return "Vector" + str(self)
 
 class VectorBasis(object):
     """Represents a vector basis in 3D-space"""
@@ -195,6 +195,7 @@ class Sphere(object):
         """Create a sphere with a given centre point and radius"""
         self.centre = centre
         self.radius = radius
+        self.sqr_radius = radius * radius
 
     def normal(self, p):
         """The surface normal at the given point on the sphere"""
@@ -202,11 +203,10 @@ class Sphere(object):
 
     def intersect(self, ray):
         """tests whether a ray intersects a sphere."""
-        hit = None
 
         m = ray.start - self.centre
         b = dot( m, ray.dir )
-        c = dot( m, m ) - self.radius * self.radius
+        c = dot( m, m ) - self.sqr_radius
         if ( ( c > 0.0 ) and ( b > 0.0 ) ): return None
         discr = b*b - c
         if discr < 0.0: return None

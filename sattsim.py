@@ -6,9 +6,10 @@ from typing import List
 from scipy.optimize import fsolve
 import geom as ge
 from mpl_toolkits.basemap import Basemap
+import plotly.graph_objects as go
 from itertools import chain
-from matplotlib.patches import Polygon
-
+from shapely.geometry import Point
+from shapely.geometry.polygon import Polygon
 
 # -----------------------------------------------------------------------------
 # ---------------------------------- Auxiliary functions ----------------------
@@ -273,7 +274,7 @@ class SatAntenna:
         Returns:
             float: Antenna gain.
         """
-        cos_th = np.dot( self.beam_direction_vector.dot( ge.Vector( dir_vector ).norm() ) )
+        cos_th = self.beam_direction_vector.dot( ge.Vector( dir_vector ).norm() )
         ant_gain = 0.0 if cos_th < 0.0 else ( self.max_gain * ( cos_th**( self.power_factor ) ) )
         return ant_gain
 
@@ -322,7 +323,7 @@ class GeoSatellite:
     # Geostationary satellite orbit radius
     orbit_rad = PhyConstants.GEO_ORBIT_RAD_KM.value
 
-    def __init__(self, sat_name: str, init_az: float, lat_long_target_position: List[float], ant_hpbw: float ) -> None:
+    def __init__(self, sat_name: str, init_az: float, lat_long_target_position: List[float], ant_hpbw: float, tx_power: float ) -> None:
 
         """Initializing a geo satellite instance.
         Args:
@@ -347,6 +348,7 @@ class GeoSatellite:
         self.path_cart = [ self.current_cart ]
         self.time = [ 0 ]
 
+        self.tx_power = tx_power
         # Vector basis
         self._sat_vec_basis = self._get_ref_vectorial_base()
 
@@ -410,14 +412,19 @@ class GeoSatellite:
         return el, az
 
     def _update_beam_vector( self ):
-        """Updates the beam direction vector referenced in the ground vector basis.
+        """Updates the beam direction vector referenced in the earth vector basis.
         """
         # Azimuth and elevation angles on the reference basis
         az = self._beam_dir_el_az[1]
         el = self._beam_dir_el_az[0]
         # Update the beam vector 
-        cart_p = np.array(sph2cart(1.0, el, az), ndmin=2).T
-        self._beam_vector_be = ge.Vector( np.matmul( cart_p, self._sat_vec_basis.basis_mat ) ) ## CORRIGIR AQUI!!
+        cart_p = sph2cart(1.0, el, az)
+
+        self._beam_vector_be = cart_p[ 0 ] * self._sat_vec_basis.v1 + \
+            cart_p[ 1 ] * self._sat_vec_basis.v2 + \
+            cart_p[ 2 ] * self._sat_vec_basis.v3
+
+        print(self._beam_vector_be)
 
         return
 
@@ -512,9 +519,6 @@ class GeoSatellite:
         ax.quiver( *self.current_cart, r * self._sat_vec_basis.v2.dx, r * self._sat_vec_basis.v2.dy, r * self._sat_vec_basis.v2.dz, color='red')
         ax.quiver( *self.current_cart, r * self._sat_vec_basis.v3.dx, r * self._sat_vec_basis.v3.dy, r * self._sat_vec_basis.v3.dz, color='black')
         ax.quiver( *self.current_cart, r * self._beam_vector_be.dx, r * self._beam_vector_be.dy, r * self._beam_vector_be.dz, color='green')
-        
-        for covp in self.coverage_zone_cart:
-            ax.scatter( *covp, marker='o', linewidth=4, s=100, color='r' )
 
         ax.set_zlim(-PhyConstants.GEO_ORBIT_RAD_KM.value, PhyConstants.GEO_ORBIT_RAD_KM.value)
         ax.set_ylim(-PhyConstants.GEO_ORBIT_RAD_KM.value, PhyConstants.GEO_ORBIT_RAD_KM.value)
@@ -693,7 +697,8 @@ class System:
                  earth: Earth, 
                  earth_stations_net: List[EarthStation], 
                  geo_sat_net: List[GeoSatellite], 
-                 ngeo_sat_net: List[NGeoSatellite], 
+                 ngeo_sat_net: List[NGeoSatellite],
+                 frequency: float,
                  cone_aperture: float = 1.0 ) -> None:
 
         self.earth = earth # Earth reference
@@ -702,6 +707,8 @@ class System:
         self.ngeo_sat_net = ngeo_sat_net
         self.time = [0]
         self.cone_aperture = cone_aperture
+        self.frequency = frequency
+        self.wavelength = PhyConstants.LIGHT_SPEED.value / self.frequency
         self.coverage_zones = [self.compute_coverage_zones()]
         
     def compute_coverage_zones( self ):
@@ -713,20 +720,27 @@ class System:
 
         # Dictionary with the relationship between satellite and coverage area on Earth
         sat_cov_dict = {}
+        cov_poly = {}
         # Interaction on Geo satellites
         for geo_sat_name, geo_sat in self.geo_sat_net.items():
 
             aux_list = []
             # Ray origin
             ray_origin = ge.Point( *geo_sat.current_cart )
+            sat2earthc_vec = ge.Point( 0,0,0 ) - ray_origin
+
+            # Satellite to earth center distance
+            sat2earth_dist = ge.length( sat2earthc_vec )
+            # Earth radius
+            earth_rad = self.earth.earth_rad
 
             # El-Az angles of the cone
             max_cone_aperture = self.cone_aperture * geo_sat.antenna.hpbw_rad
-            azv = np.linspace( -np.pi, np.pi, 100 )
-            elv = np.linspace( max_cone_aperture, 0, 100 )
+            azv = np.linspace( 0, 2 * np.pi, 100 )
+            elv = np.linspace( max_cone_aperture, 0, 1000 )
             for az in azv:
                 for el in elv:
-
+                    
                     cart_p = sph2cart(1.0, el, az)
                     ray_dir_vector = cart_p[ 0 ] * geo_sat.antenna.vec_basis.v1 + \
                         cart_p[ 1 ] * geo_sat.antenna.vec_basis.v2 + \
@@ -739,7 +753,43 @@ class System:
                         aux_list.append( intersection_point.asarray() )
                         break
 
-            sat_cov_dict[ geo_sat.name ] = np.array( aux_list )
+            sat_cov_dict[ geo_sat.name ] = {}
+            sat_cov_dict[ geo_sat.name ][ 'Array' ] = np.array( aux_list )
+            sat_cov_dict[ geo_sat.name ][ 'LatLong' ] = np.rad2deg( cart_2_ll( np.array( aux_list ) ) )
+            sat_cov_dict[ geo_sat.name ][ 'Poly' ] = Polygon( sat_cov_dict[ geo_sat.name ][ 'LatLong' ] )
+
+
+            minx, maxx = min(sat_cov_dict[ geo_sat.name ][ 'LatLong' ][:,0]), max(sat_cov_dict[ geo_sat.name ][ 'LatLong' ][:,0])
+            miny, maxy = min(sat_cov_dict[ geo_sat.name ][ 'LatLong' ][:,1]), max(sat_cov_dict[ geo_sat.name ][ 'LatLong' ][:,1])
+            nd = 500
+            # Long
+            xv = np.linspace( minx, maxx, nd)
+            # Lat
+            yv = np.linspace( miny, maxy, nd)
+            coverage = np.ones( (nd,nd) )
+            pfd = np.ones( (nd,nd) )
+            coverage[:] = np.nan
+            pfd[:] = np.nan
+            for i, x in enumerate(xv):
+                for j, y in enumerate(yv):
+
+                    if sat_cov_dict[ geo_sat.name ][ 'Poly' ].contains( Point( x, y ) ):
+
+                        # Convert to spherical
+                        az, el = latlong2azel( np.deg2rad( y ), np.deg2rad( x ) )
+                        es_point = ge.Point( *sph2cart( self.earth.earth_rad, el, az) )
+                        # Compute the distance
+                        sat_to_point_vec = es_point - ray_origin
+                        sat_to_point_dist = ge.length( sat_to_point_vec ) * 1000
+
+                        # Antenna Gains
+                        tx_ant_gain = geo_sat.antenna.ant_gain_on_direction( sat_to_point_vec )
+                        coverage[ j, i ] = 10.0 * np.log10( tx_ant_gain * geo_sat.tx_power * ( self.wavelength / ( 4.0 * np.pi * sat_to_point_dist ) )**2 )
+                        pfd[ j, i ] = 10.0 * np.log10( tx_ant_gain * geo_sat.tx_power * ( 1.0 / ( 4.0 * np.pi * sat_to_point_dist**2 ) ) )
+
+            sat_cov_dict[ geo_sat.name ][ 'Cov' ] = coverage
+            sat_cov_dict[ geo_sat.name ][ 'PFD' ] = pfd
+
 
         return sat_cov_dict
 
@@ -747,22 +797,43 @@ class System:
 
         # Plot earth basemap
         fig = plt.figure(figsize=(12, 10), edgecolor='w')
-        basemap = Basemap(projection='cyl', resolution=None, llcrnrlat=-90, urcrnrlat=90, llcrnrlon=-180, urcrnrlon=180, )
-        draw_map( basemap )
+        basemap = Basemap(projection='cyl', resolution='c', llcrnrlat=-90, urcrnrlat=90, llcrnrlon=-180, urcrnrlon=180 )
+        # draw a shaded-relief image
+        scale=0.2
+        basemap.shadedrelief(scale=scale)
+        # lats and longs are returned as a dictionary
+        lats = basemap.drawparallels(np.linspace(-90, 90, 13), labels=[1,1,0,1], fontsize=8)
+        lons = basemap.drawmeridians(np.linspace(-180, 180, 13), labels=[1,1,0,1], fontsize=8)
+        # keys contain the plt.Line2D instances
+        lat_lines = chain(*(tup[1][0] for tup in lats.items()))
+        lon_lines = chain(*(tup[1][0] for tup in lons.items()))
+        all_lines = chain(lat_lines, lon_lines)
+        # cycle through these lines and set the desired style
+        for line in all_lines:
+            line.set(linestyle='-', alpha=0.3, color='w')
+        plt.xlabel('Longitude', labelpad=40, fontsize=8)
+        plt.ylabel('Latitude', labelpad=40, fontsize=8)
 
         # Get the last coverage zones map
         current_time_cov_dict = self.coverage_zones[-1]
         if sat_name in current_time_cov_dict:
             
-            # Coverage zone
-            ll_cov_zone = np.rad2deg( cart_2_ll( current_time_cov_dict[ sat_name ] ) )
+            # Coverage zone dict
+            cov_dict = current_time_cov_dict[ sat_name ]
+            # Coverage bounding box
+            cov_bbox = min(cov_dict[ 'LatLong' ][:,0]), max(cov_dict[ 'LatLong' ][:,0]), min(cov_dict[ 'LatLong' ][:,1]), max(cov_dict[ 'LatLong' ][:,1])
+            print(cov_bbox)
             # Coverage zone polygon
-            poly = Polygon( ll_cov_zone, facecolor='red', alpha=0.4 )
-            plt.gca().add_patch(poly)
+            xs, ys = cov_dict[ 'Poly' ].exterior.xy  
+            # plt.fill(xs, ys, alpha=0.4, fc='r', ec='none')
             # Plot coverage zone contour
-            basemap.plot( ll_cov_zone[ :, 0 ], ll_cov_zone[ :, 1 ], latlon=True, linestyle='--', label=sat_name, color='red', linewidth=1.5 )
+            basemap.plot( cov_dict[ 'LatLong' ][ :, 0 ], cov_dict[ 'LatLong' ][ :, 1 ], latlon=True, linestyle='--', label=sat_name, color='red', linewidth=1.5 )
             # Title
             plt.title( f'Zona de cobertura - {sat_name}, Abertura: {self.cone_aperture} x {self.geo_sat_net[ sat_name ].antenna.hpbw_dg }°' )
+
+            plt.imshow( cov_dict['Cov'], extent=cov_bbox, origin='lower' )
+
+            basemap.plot( np.rad2deg( self.geo_sat_net[ sat_name ]._init_lat_lon_target_position[1] ), np.rad2deg( self.geo_sat_net[ sat_name ]._init_lat_lon_target_position[0] ), latlon=True, marker='x', label='Centro do Beam', linestyle='None', color='red', linewidth=1.5 )
 
         plt.legend()
         plt.show()
