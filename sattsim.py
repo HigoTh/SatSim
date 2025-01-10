@@ -361,7 +361,8 @@ class GeoSatellite:
         # Satellite antenna
         self.antenna = SatAntenna( self._beam_vector_be, ant_hpbw )
 
-        self.coverage_zone_cart = self._get_coverage_zone()
+        # Coverage data
+        self.coverage_data = {}
 
     def _get_ref_vectorial_base( self ):
         """ Determines the satellite's reference vector basis and the basis matrix.
@@ -706,6 +707,7 @@ class System:
         self.geo_sat_net = { geo_sat.name: geo_sat for geo_sat in geo_sat_net } # Geo satellites list
         self.ngeo_sat_net = ngeo_sat_net
         self.time = [0]
+        self.st_id = 0
         self.cone_aperture = cone_aperture
         self.frequency = frequency
         self.wavelength = PhyConstants.LIGHT_SPEED.value / self.frequency
@@ -753,14 +755,13 @@ class System:
                         aux_list.append( intersection_point.asarray() )
                         break
 
-            sat_cov_dict[ geo_sat.name ] = {}
-            sat_cov_dict[ geo_sat.name ][ 'Array' ] = np.array( aux_list )
-            sat_cov_dict[ geo_sat.name ][ 'LatLong' ] = np.rad2deg( cart_2_ll( np.array( aux_list ) ) )
-            sat_cov_dict[ geo_sat.name ][ 'Poly' ] = Polygon( sat_cov_dict[ geo_sat.name ][ 'LatLong' ] )
+            geo_sat.coverage_data[ self.st_id ] = {}
+            geo_sat.coverage_data[ self.st_id ][ 'Array' ] = np.array( aux_list )
+            geo_sat.coverage_data[ self.st_id ][ 'LatLong' ] = np.rad2deg( cart_2_ll( np.array( aux_list ) ) )
+            geo_sat.coverage_data[ self.st_id ][ 'Poly' ] = Polygon( geo_sat.coverage_data[ self.st_id ][ 'LatLong' ] )
 
-
-            minx, maxx = min(sat_cov_dict[ geo_sat.name ][ 'LatLong' ][:,0]), max(sat_cov_dict[ geo_sat.name ][ 'LatLong' ][:,0])
-            miny, maxy = min(sat_cov_dict[ geo_sat.name ][ 'LatLong' ][:,1]), max(sat_cov_dict[ geo_sat.name ][ 'LatLong' ][:,1])
+            minx, maxx = min(geo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,0]), max(geo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,0])
+            miny, maxy = min(geo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,1]), max(geo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,1])
             nd = 500
             # Long
             xv = np.linspace( minx, maxx, nd)
@@ -773,7 +774,7 @@ class System:
             for i, x in enumerate(xv):
                 for j, y in enumerate(yv):
 
-                    if sat_cov_dict[ geo_sat.name ][ 'Poly' ].contains( Point( x, y ) ):
+                    if geo_sat.coverage_data[ self.st_id ][ 'Poly' ].contains( Point( x, y ) ):
 
                         # Convert to spherical
                         az, el = latlong2azel( np.deg2rad( y ), np.deg2rad( x ) )
@@ -787,11 +788,31 @@ class System:
                         coverage[ j, i ] = 10.0 * np.log10( tx_ant_gain * geo_sat.tx_power * ( self.wavelength / ( 4.0 * np.pi * sat_to_point_dist ) )**2 )
                         pfd[ j, i ] = 10.0 * np.log10( tx_ant_gain * geo_sat.tx_power * ( 1.0 / ( 4.0 * np.pi * sat_to_point_dist**2 ) ) )
 
-            sat_cov_dict[ geo_sat.name ][ 'Cov' ] = coverage
-            sat_cov_dict[ geo_sat.name ][ 'PFD' ] = pfd
-
+            geo_sat.coverage_data[ self.st_id ][ 'Cov' ] = coverage
+            geo_sat.coverage_data[ self.st_id ][ 'PFD' ] = pfd
+            geo_sat.coverage_data[ self.st_id ][ 'X_axis' ] = xv
+            geo_sat.coverage_data[ self.st_id ][ 'Y_axis' ] = yv
 
         return sat_cov_dict
+
+    # def compute_interference_zones( self ):
+
+    #     # Interaction on Geo satellites
+    #     for geo_sat_name, geo_sat in self.geo_sat_net.items():
+
+    #         # Search for interfering satellites
+    #         for int_sat_name, int_sat in self.geo_sat_net.items():
+
+    #             # Jump the main satellite
+    #             if int_sat_name == geo_sat_name:
+    #                 continue
+
+    #             print(p1.intersects(p2))
+
+                
+
+
+
 
     def plot_current_coverage_zone( self, sat_name: str ):
 
@@ -815,14 +836,15 @@ class System:
         plt.ylabel('Latitude', labelpad=40, fontsize=8)
 
         # Get the last coverage zones map
-        current_time_cov_dict = self.coverage_zones[-1]
-        if sat_name in current_time_cov_dict:
-            
+        current_st_id = self.st_id
+        if sat_name in self.geo_sat_net:
+
+            sat = self.geo_sat_net[ sat_name ]
             # Coverage zone dict
-            cov_dict = current_time_cov_dict[ sat_name ]
+            cov_dict = sat.coverage_data[ current_st_id ]
+            # cov_dict = current_time_cov_dict[ sat_name ]
             # Coverage bounding box
-            cov_bbox = min(cov_dict[ 'LatLong' ][:,0]), max(cov_dict[ 'LatLong' ][:,0]), min(cov_dict[ 'LatLong' ][:,1]), max(cov_dict[ 'LatLong' ][:,1])
-            print(cov_bbox)
+            cov_bbox = cov_dict[ 'X_axis' ][ 0 ], cov_dict[ 'X_axis' ][ -1 ], cov_dict[ 'Y_axis' ][ 0 ], cov_dict[ 'Y_axis' ][ -1 ]
             # Coverage zone polygon
             xs, ys = cov_dict[ 'Poly' ].exterior.xy  
             # plt.fill(xs, ys, alpha=0.4, fc='r', ec='none')
@@ -839,8 +861,6 @@ class System:
         plt.show()
 
         return
-
-
 
     def update_system( self, dt: float ):
 
