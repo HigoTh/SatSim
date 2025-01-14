@@ -429,32 +429,6 @@ class GeoSatellite:
 
         return
 
-    def _get_coverage_zone( self ):
-        """Ray tracing to determine coverage zone.
-        """
-
-        coverage_zone_cart = []
-        # Ray origin
-        ray_origin = ge.Point( *self.current_cart )
-
-        # El-Az angles of the cone
-        el = self.antenna.hpbw_rad
-        azv = np.linspace( 0, 2 * np.pi, 100 )
-        for az in azv:
-
-            cart_p = sph2cart(1.0, el, az)
-            ray_dir_vector = cart_p[ 0 ] * self.antenna.vec_basis.v1 + \
-                cart_p[ 1 ] * self.antenna.vec_basis.v2 + \
-                cart_p[ 2 ] * self.antenna.vec_basis.v3
-            # Ray
-            ray = ge.Ray( ray_origin, ray_dir_vector )
-            # Intersection point
-            intersection_point = glb_earth_sphere.intersect( ray )
-            if intersection_point is not None:
-                coverage_zone_cart.append( intersection_point.asarray() )
-
-        return coverage_zone_cart
-
     def update_position(self, dt:float):
         """ Updates the position, base vector and pointing vector of the satellite.
         Returns:
@@ -530,24 +504,6 @@ class GeoSatellite:
         plt.show()
 
         return ret
-
-    def plot_sat_path( self, vecs_exag = 10000, return_fig = False ):
-
-        fig = plt.figure(figsize=(12, 10), edgecolor='w')
-        m = Basemap(projection='cyl', resolution=None, llcrnrlat=-90, urcrnrlat=90, llcrnrlon=-180, urcrnrlon=180, )
-        draw_map(m)
-
-        lat_lon_array = np.array( self.path_lat_long )
-        # Latitude array
-        m.plot( np.rad2deg( lat_lon_array[ :, 1 ] ), np.rad2deg( lat_lon_array[ :, 0 ] ), latlon=True, linestyle='--', label='Trajeto', color='blue', linewidth=3 )
-        m.scatter( np.rad2deg( lat_lon_array[ 0, 1 ] ), np.rad2deg( lat_lon_array[ 0, 0 ] ), latlon=True, marker='x', linewidth=4, s=150, color='blue', label='Posição inicial' )
-        m.scatter( np.rad2deg( lat_lon_array[ -1, 1 ] ), np.rad2deg( lat_lon_array[ -1, 0 ] ), latlon=True, marker='x', linewidth=4, s=150, color='red', label='Posição final' )
-        
-        plt.legend()
-        plt.show()
-
-        return
-
 
 class NGeoSatellite:
 
@@ -806,12 +762,17 @@ class System:
     #             # Jump the main satellite
     #             if int_sat_name == geo_sat_name:
     #                 continue
+    #             # Main sat coverage poly
+    #             m_poly = geo_sat.coverage_data[ self.st_id ][ 'Poly' ]
+    #             # Interfering coverage poly
+    #             i_poly = int_sat.coverage_data[ self.st_id ][ 'Poly' ]
 
-    #             print(p1.intersects(p2))
+    #             int_poly = m_poly.boundary.intersection(i_poly)
 
-                
+    #             print(int_poly.convex_hull)
+    #             print(m_poly)
 
-
+    #             return int_poly.convex_hull
 
 
     def plot_current_coverage_zone( self, sat_name: str ):
