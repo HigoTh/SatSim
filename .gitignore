@@ -1,0 +1,4 @@
+.env/
+.git/
+.ipynb_checkpoints
+*.py[cod]
