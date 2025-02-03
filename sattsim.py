@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 from itertools import chain
 from shapely.geometry import Point
 from shapely.geometry.polygon import Polygon
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # -----------------------------------------------------------------------------
 # ---------------------------------- Auxiliary functions ----------------------
@@ -992,6 +993,7 @@ class System:
 
         # Plot earth basemap
         fig = plt.figure(figsize=(12, 10), edgecolor='w')
+        ax = plt.gca()
         basemap = Basemap(projection='cyl', resolution='c', llcrnrlat=-90, urcrnrlat=90, llcrnrlon=-180, urcrnrlon=180 )
         # draw a shaded-relief image
         scale=0.2
@@ -1030,12 +1032,17 @@ class System:
             basemap.plot( cov_dict[ 'LatLong' ][ :, 0 ], cov_dict[ 'LatLong' ][ :, 1 ], latlon=True, linestyle='--', label=sat_name, color='red', linewidth=1.5 )
             # Title
             plt.title( f'Zona de cobertura - {sat_name}, Abertura: {self.cone_aperture} x { sat.antenna.hpbw_dg }°' )
-
-            plt.imshow( cov_dict['Cov'], extent=cov_bbox, origin='lower' )
-
+            # Legenda
+            plt.legend()
+            # Mapa de calor
+            im = plt.imshow( cov_dict['Cov'], extent=cov_bbox, origin='lower' )
+            # Barra de cores
+            divider = make_axes_locatable(ax)
+            cax = divider.append_axes("right", size="2%", pad=0.5)
+            plt.colorbar(im, cax=cax)
             # basemap.plot( np.rad2deg( self.geo_sat_net[ sat_name ]._init_lat_lon_target_position[1] ), np.rad2deg( self.geo_sat_net[ sat_name ]._init_lat_lon_target_position[0] ), latlon=True, marker='x', label='Centro do Beam', linestyle='None', color='red', linewidth=1.5 )
 
-        plt.legend()
+        
         plt.show()
 
         return
