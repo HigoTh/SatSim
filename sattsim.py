@@ -425,8 +425,6 @@ class GeoSatellite:
             cart_p[ 1 ] * self._sat_vec_basis.v2 + \
             cart_p[ 2 ] * self._sat_vec_basis.v3
 
-        print(self._beam_vector_be)
-
         return
 
     def update_position(self, dt:float):
@@ -507,17 +505,20 @@ class GeoSatellite:
 
 class NGeoSatellite:
 
-    def __init__(self, 
+    def __init__(self,
+                 sat_name: str,
                  init_asc_node_long: float, 
                  inclination_angle: float,
                  apogee_dist: float,
                  perigee_dist: float,
                  init_perigee_arg: float,
-                 init_orbit_angle: float ) -> None:
+                 init_orbit_angle: float,
+                 ant_hpbw: float, 
+                 tx_power: float ) -> None:
 
-        # Longitude of ascending node - Omega
-        self.init_asc_node_long = init_asc_node_long
-        self.current_asc_node_long = init_asc_node_long
+        self.name = sat_name
+
+        # Constant factors ----------------------------------------------------
         # Inclination angle - i
         self.inclination_angle = inclination_angle
         # Distance from the centre of the Earth to the satellite at apogee - Ra
@@ -528,9 +529,6 @@ class NGeoSatellite:
         self.semi_major_axis = (apogee_dist + perigee_dist) / 2.0
         # Eccentricity - e
         self.eccentricity = (apogee_dist - perigee_dist) / (apogee_dist + perigee_dist)
-        # argument of perigee - omega
-        self.init_perigee_arg = init_perigee_arg
-        self.current_perigee_arg = init_perigee_arg
         # Focal parameter - p
         self.focal_parameter = self.semi_major_axis * ( 1 - (self.eccentricity)**2 )
         # Line of nodes - n
@@ -541,25 +539,101 @@ class NGeoSatellite:
         self.perigee_arg_prec = self._compute_perigee_arg_prec()
         # Orbit period - T
         self.orbit_period = (2 * np.pi) * np.sqrt( (self.semi_major_axis**3) / PhyConstants.GRAV_CONSTANT.value )
+
+        # Time-dependent factors ----------------------------------------------
+        self.time = [0]
+        # Longitude of ascending node
+        self.asc_node_long = [init_asc_node_long]
+        # Argument of perigee
+        self.perigee_arg = [init_perigee_arg]
         # Orbit angle - v
-        self.init_orbit_angle = init_orbit_angle
-        self.current_orbit_angle = self.init_orbit_angle
+        self.orbit_angle = [init_orbit_angle]
         # Eccentric anomaly - E
-        self.init_ecc_anom = self._compute_init_ecc_anomaly()
-        self.current_ecc_anom = self.init_ecc_anom
+        self.ecc_anom = [self._compute_init_ecc_anomaly()]
         # Mean anomaly - M
-        self.init_mean_anom = self.init_ecc_anom - self.eccentricity * np.sin( self.init_ecc_anom )
-        self.current_mean_anom = self.init_mean_anom
+        self.mean_anom = [ self.ecc_anom[-1] - self.eccentricity * np.sin( self.ecc_anom[-1] ) ]
         # Sat distance - R
-        self.init_sat_dist = self.focal_parameter / ( 1 + self.eccentricity * np.cos( self.init_orbit_angle ) )
-        self.current_sat_dist = self.init_sat_dist
+        self.sat_dist = [ self.focal_parameter / ( 1 + self.eccentricity * np.cos( self.orbit_angle[-1 ] ) ) ]
         # Satellite position (PQ-base)
-        self.init_sat_position_pq = np.array( [ self.init_sat_dist * np.cos( self.init_orbit_angle ), self.init_sat_dist * np.sin( self.init_orbit_angle ), 0.0 ] )
-        self.current_sat_position_pq = self.init_sat_position_pq
+        self.sat_position_pq = [ [self.sat_dist[ -1 ] * np.cos( self.orbit_angle[ -1 ] ), self.sat_dist[ -1 ] * np.sin( self.orbit_angle[ -1 ] ), 0.0] ]
         # Satellite position (XYZ-base)
         rot_matrix = self._compute_rotation_matrix()
-        self.init_sat_position_xyz = np.matmul( rot_matrix, self.init_sat_position_pq )
-        self.current_sat_position_xyz = self.init_sat_position_xyz
+        self.sat_position_xyz = [ np.matmul( rot_matrix, np.array( self.sat_position_pq[ -1 ] ).T ) ]
+
+        # Satellite vector basis
+        self._sat_vec_basis = self._get_ref_vectorial_base()
+
+        # Beam direction vector (Earth and Satellite VB)
+        self._beam_vector_be = self._get_beam_vector_be()
+        self._beam_vector_bs = self._get_beam_vector_bs()
+        self._beam_dir_el_az = self._get_el_az_angles_beam()
+
+        # Satellite antenna
+        self.antenna = SatAntenna( self._beam_vector_be, ant_hpbw )
+        self.tx_power = tx_power
+
+        self.coverage_data = {}
+
+    def _get_ref_vectorial_base( self ):
+        """ Determines the satellite's reference vector basis and the basis matrix.
+        Returns:
+            vec_basis (VecBasis): Vector basis.
+        """
+        # Compute basis vectors
+        r_u = ge.Vector( self.sat_position_xyz[ -1 ] ).norm()
+        v_u = ge.Vector( [ -r_u.dy, r_u.dx, 0.0 ] ).norm()
+        t_u = r_u.cross( v_u ).norm()
+
+        # Get vector basis
+        vec_basis = ge.VectorBasis( v_u, r_u, t_u )
+        return vec_basis
+
+    def _get_beam_vector_be( self ):
+        """ Calculates the beam direction vector referenced in the terrestrial vector basis.
+        Returns:
+            beam_vector_be (Vector): beam direction vector (Earth vector basis)
+        """
+        # Target point of earth surface
+        earth_surface_pos = [0,0,0]
+        # Beam vector on earth basis
+        beam_vector_be = (ge.Vector( earth_surface_pos ) - ge.Vector( self.sat_position_xyz[-1] )).norm()
+
+        return beam_vector_be
+
+    def _get_beam_vector_bs( self ):
+        """ Calculates the beam direction vector referenced in the satellite vector basis.
+        Returns:
+
+        """
+        # Beam vector on satellite basis
+        beam_vector_base_s = np.linalg.inv( self._sat_vec_basis.basis_mat ).dot( self._beam_vector_be.asarray() )
+        beam_vector_bs = ge.Vector( beam_vector_base_s ).norm()
+        return beam_vector_bs
+
+    def _get_el_az_angles_beam( self ):
+        """Calculates the azimuth and elevation angles of the beam direction with 
+        respect to the satellite base vector.
+        """
+        # Azimuth and elevation angles referenced to the satellite basis
+        az = np.arctan2( self._beam_vector_bs.dy, self._beam_vector_bs.dx )
+        el = np.arccos( self._beam_vector_bs.dz )
+
+        return el, az
+
+    def _update_beam_vector( self ):
+        """Updates the beam direction vector referenced in the earth vector basis.
+        """
+        # Azimuth and elevation angles on the reference basis
+        az = self._beam_dir_el_az[1]
+        el = self._beam_dir_el_az[0]
+        # Update the beam vector 
+        cart_p = sph2cart(1.0, el, az)
+
+        self._beam_vector_be = cart_p[ 0 ] * self._sat_vec_basis.v1 + \
+            cart_p[ 1 ] * self._sat_vec_basis.v2 + \
+            cart_p[ 2 ] * self._sat_vec_basis.v3
+
+        return
 
     def _compute_line_of_nodes( self ):
 
@@ -587,7 +661,7 @@ class NGeoSatellite:
     def _compute_init_ecc_anomaly( self ):
 
         e1 = np.sqrt( ( 1.0 + self.eccentricity ) / ( 1.0 - self.eccentricity ) )
-        p1 = np.tan( self.init_orbit_angle / 2.0 ) / e1
+        p1 = np.tan( self.orbit_angle[ -1 ] / 2.0 ) / e1
         ecc_anomaly = 2.0 * np.arctan( p1 )
 
         return ecc_anomaly
@@ -595,17 +669,17 @@ class NGeoSatellite:
     def _solve_ecc_anomaly( self ):
 
         # Solve Kepler equation by Newton-Raphson method
-        func = lambda x : x - self.eccentricity * np.sin(x) - self.current_mean_anom
+        func = lambda x : x - self.eccentricity * np.sin(x) - self.mean_anom[-1]
         # x = symbols('x')
         # expr = x - self.eccentricity * sin(x) - self.current_mean_anom
-        sol = fsolve(func, self.current_ecc_anom)
+        sol = fsolve(func, self.ecc_anom[-1])
 
         return sol[0]
 
     def _compute_rotation_matrix( self ):
 
-        omega = self.current_asc_node_long
-        omega_m = self.current_perigee_arg
+        omega = self.asc_node_long[ -1 ]
+        omega_m = self.perigee_arg[ -1 ]
         i = self.inclination_angle
         # Rotation matrix
         r_11 = np.cos( omega ) * np.cos( omega_m ) - np.sin( omega ) * np.sin( omega_m ) * np.cos( i )
@@ -615,7 +689,7 @@ class NGeoSatellite:
         r_22 = -np.sin( omega ) * np.sin( omega_m ) + np.cos( omega ) * np.cos( omega_m ) * np.cos( i )
         r_23 = -np.cos( omega ) * np.sin( i )
         r_31 = np.sin( omega_m ) * np.sin( i )
-        r_32 = np.cos( omega_m ) + np.sin( i )
+        r_32 = np.cos( omega_m ) * np.sin( i )
         r_33 = np.cos( i )
         rot_mat = np.array( [[ r_11, r_12, r_13 ], [ r_21, r_22, r_23 ], [ r_31, r_32, r_33 ]] )
 
@@ -623,27 +697,95 @@ class NGeoSatellite:
 
     def update_position( self, dt: float ):
 
+        # Add the new time instant to the list
+        self.time.append( self.time[ -1 ] + dt )
+
         # Perigee argument
-        self.current_perigee_arg = self.current_perigee_arg + self.perigee_arg_prec * dt
+        self.perigee_arg.append( self.perigee_arg[ 0 ] + self.perigee_arg_prec * self.time[ -1 ] )
         # Ascending node longitude
-        self.current_asc_node_long = self.current_asc_node_long + self.rate_asc * dt
+        self.asc_node_long.append( self.asc_node_long[ 0 ] + self.rate_asc * self.time[ -1 ] )
         # Mean anomaly
-        self.current_mean_anom = self.current_mean_anom + self.line_of_nodes * dt
+        self.mean_anom.append( self.mean_anom[ 0 ] + self.line_of_nodes * self.time[ -1 ] )
         # Ecc anomaly
-        self.current_ecc_anom = self._solve_ecc_anomaly()
+        self.ecc_anom.append( self._solve_ecc_anomaly() )
         # True anomaly
-        e1 = np.sqrt( ( 1.0 + self.eccentricity ) / ( 1.0 - self.eccentricity ) ) * np.tan( self.current_ecc_anom / 2.0 )
-        self.current_orbit_angle = 2.0 * np.arctan( e1 )
+        e1 = np.sqrt( ( 1.0 + self.eccentricity ) / ( 1.0 - self.eccentricity ) ) * np.tan( self.ecc_anom[ -1 ] / 2.0 )
+        self.orbit_angle.append( 2.0 * np.arctan( e1 ) )
 
         # Satellite distance
-        self.current_sat_dist = self.focal_parameter / ( 1 + self.eccentricity * np.cos( self.current_orbit_angle ) )
+        self.sat_dist.append( self.focal_parameter / ( 1 + self.eccentricity * np.cos( self.orbit_angle[ -1 ] ) ) )
         # Satellite position P-Q
-        self.current_sat_position_pq = [ self.current_sat_dist * np.cos( self.current_orbit_angle ), self.init_sat_dist * np.sin( self.current_orbit_angle ), 0.0 ]
+        self.sat_position_pq.append( [ self.sat_dist[ -1 ] * np.cos( self.orbit_angle[ -1 ] ), self.sat_dist[ -1 ] * np.sin( self.orbit_angle[ -1 ] ), 0.0 ] )
         # Satellite position xyz
         rot_matrix = self._compute_rotation_matrix()
-        self.current_sat_position_xyz = np.matmul( rot_matrix, self.current_sat_position_pq )
+        self.sat_position_xyz.append( list( np.matmul( rot_matrix, np.array( self.sat_position_pq[ -1 ] ).T ) ) )
+
+        # Update vector basis
+        self._sat_vec_basis = self._get_ref_vectorial_base()
+        # Update beam vector
+        self._update_beam_vector()
 
         return
+
+    def plot_sat( self, return_fig = False, vecs_exag = 10000 ):
+        """ Plots satellite position, base vector, pointing vector and terrestrial sphere.
+        Returns:
+            Object of the plotted figure.
+        """
+
+        fig = plt.figure(figsize=(10,10), dpi=80)
+        
+        ax = fig.add_subplot(111, projection='3d')
+        # Make data
+        r = PhyConstants.EARTH_RAD_KM.value
+        u = np.linspace(0, 2 * np.pi, 100)
+        v = np.linspace(0, np.pi, 100)
+        x = r * np.outer(np.cos(u), np.sin(v))
+        y = r * np.outer(np.sin(u), np.sin(v))
+        z = r * np.outer(np.ones(np.size(u)), np.cos(v))
+        # Plot the surface
+        ax.plot_surface(x, y, z, color='linen', alpha=0.5)
+        # plot circular curves over the surface
+        theta = np.linspace(0, 2 * np.pi, 100)
+        z = np.zeros(100)
+        x = r * np.sin(theta)
+        y = r * np.cos(theta)
+
+        ax.plot(x, y, z, color='black', alpha=0.75)
+        ax.plot(z, x, y, color='black', alpha=0.75)
+
+        ## add axis lines
+        zeros = np.zeros(1000)
+        line = np.linspace(-r,r,1000)
+
+        ax.plot(line, zeros, zeros, color='black', alpha=0.75)
+        ax.plot(zeros, line, zeros, color='black', alpha=0.75)
+        ax.plot(zeros, zeros, line, color='black', alpha=0.75)
+
+        # Plot Ngeo satellite
+        scat = ax.scatter( *(self.sat_position_xyz[-1]), marker='x', linewidth=4, s=150, color='blue' )
+        # Plot vector basis
+        r = vecs_exag
+        ax.quiver( *(self.sat_position_xyz[-1]), r * self._sat_vec_basis.v1.dx, r * self._sat_vec_basis.v1.dy, r * self._sat_vec_basis.v1.dz, color='blue')
+        ax.quiver( *(self.sat_position_xyz[-1]), r * self._sat_vec_basis.v2.dx, r * self._sat_vec_basis.v2.dy, r * self._sat_vec_basis.v2.dz, color='red')
+        ax.quiver( *(self.sat_position_xyz[-1]), r * self._sat_vec_basis.v3.dx, r * self._sat_vec_basis.v3.dy, r * self._sat_vec_basis.v3.dz, color='black')
+        ax.quiver( *(self.sat_position_xyz[-1]), r * self._beam_vector_be.dx, r * self._beam_vector_be.dy, r * self._beam_vector_be.dz, color='green')
+
+        ax.set_zlim(-2.0 * (self.apogee_dist + PhyConstants.EARTH_RAD_KM.value) , 2.0 * (self.apogee_dist + PhyConstants.EARTH_RAD_KM.value))
+        ax.set_ylim(-2.0 * (self.apogee_dist + PhyConstants.EARTH_RAD_KM.value) , 2.0 * (self.apogee_dist + PhyConstants.EARTH_RAD_KM.value))
+        ax.set_xlim(-2.0 * (self.apogee_dist + PhyConstants.EARTH_RAD_KM.value) , 2.0 * (self.apogee_dist + PhyConstants.EARTH_RAD_KM.value))
+
+        # ret = fig if return_fig else None
+        
+        ret = None
+        if return_fig:
+            ret = fig
+        else:
+            plt.show()
+
+        return ret
+
+
 
 class System:
 
@@ -661,7 +803,7 @@ class System:
         self.earth = earth # Earth reference
         self.earth_station_net = earth_stations_net 
         self.geo_sat_net = { geo_sat.name: geo_sat for geo_sat in geo_sat_net } # Geo satellites list
-        self.ngeo_sat_net = ngeo_sat_net
+        self.ngeo_sat_net = { ngeo_sat.name: ngeo_sat for ngeo_sat in ngeo_sat_net } # NGeo satellites list
         self.time = [0]
         self.st_id = 0
         self.cone_aperture = cone_aperture
@@ -749,6 +891,77 @@ class System:
             geo_sat.coverage_data[ self.st_id ][ 'X_axis' ] = xv
             geo_sat.coverage_data[ self.st_id ][ 'Y_axis' ] = yv
 
+
+        # Interaction on Geo satellites
+        for ngeo_sat_name, ngeo_sat in self.ngeo_sat_net.items():
+
+            aux_list = []
+            # Ray origin
+            ray_origin = ge.Point( *ngeo_sat.sat_position_xyz[ -1 ] )
+            sat2earthc_vec = ge.Point( 0,0,0 ) - ray_origin
+
+            # Satellite to earth center distance
+            sat2earth_dist = ge.length( sat2earthc_vec )
+            # Earth radius
+            earth_rad = self.earth.earth_rad
+
+            # El-Az angles of the cone
+            max_cone_aperture = self.cone_aperture * ngeo_sat.antenna.hpbw_rad
+            azv = np.linspace( 0, 2 * np.pi, 100 )
+            elv = np.linspace( max_cone_aperture, 0, 1000 )
+            for az in azv:
+                for el in elv:
+                    
+                    cart_p = sph2cart(1.0, el, az)
+                    ray_dir_vector = cart_p[ 0 ] * ngeo_sat.antenna.vec_basis.v1 + \
+                        cart_p[ 1 ] * ngeo_sat.antenna.vec_basis.v2 + \
+                        cart_p[ 2 ] * ngeo_sat.antenna.vec_basis.v3
+                    # Ray
+                    ray = ge.Ray( ray_origin, ray_dir_vector )
+                    # Intersection point
+                    intersection_point = self.earth.sphere.intersect( ray )
+                    if intersection_point is not None:
+                        aux_list.append( intersection_point.asarray() )
+                        break
+
+            ngeo_sat.coverage_data[ self.st_id ] = {}
+            ngeo_sat.coverage_data[ self.st_id ][ 'Array' ] = np.array( aux_list )
+            ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ] = np.rad2deg( cart_2_ll( np.array( aux_list ) ) )
+            ngeo_sat.coverage_data[ self.st_id ][ 'Poly' ] = Polygon( ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ] )
+
+            minx, maxx = min(ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,0]), max(ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,0])
+            miny, maxy = min(ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,1]), max(ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,1])
+            nd = 500
+            # Long
+            xv = np.linspace( minx, maxx, nd)
+            # Lat
+            yv = np.linspace( miny, maxy, nd)
+            coverage = np.ones( (nd,nd) )
+            pfd = np.ones( (nd,nd) )
+            coverage[:] = np.nan
+            pfd[:] = np.nan
+            for i, x in enumerate(xv):
+                for j, y in enumerate(yv):
+
+                    if ngeo_sat.coverage_data[ self.st_id ][ 'Poly' ].contains( Point( x, y ) ):
+
+                        # Convert to spherical
+                        az, el = latlong2azel( np.deg2rad( y ), np.deg2rad( x ) )
+                        es_point = ge.Point( *sph2cart( self.earth.earth_rad, el, az) )
+                        # Compute the distance
+                        sat_to_point_vec = es_point - ray_origin
+                        sat_to_point_dist = ge.length( sat_to_point_vec ) * 1000
+
+                        # Antenna Gains
+                        tx_ant_gain = ngeo_sat.antenna.ant_gain_on_direction( sat_to_point_vec )
+                        coverage[ j, i ] = 10.0 * np.log10( tx_ant_gain * ngeo_sat.tx_power * ( self.wavelength / ( 4.0 * np.pi * sat_to_point_dist ) )**2 )
+                        pfd[ j, i ] = 10.0 * np.log10( tx_ant_gain * ngeo_sat.tx_power * ( 1.0 / ( 4.0 * np.pi * sat_to_point_dist**2 ) ) )
+
+            ngeo_sat.coverage_data[ self.st_id ][ 'Cov' ] = coverage
+            ngeo_sat.coverage_data[ self.st_id ][ 'PFD' ] = pfd
+            ngeo_sat.coverage_data[ self.st_id ][ 'X_axis' ] = xv
+            ngeo_sat.coverage_data[ self.st_id ][ 'Y_axis' ] = yv
+
         return sat_cov_dict
 
     # def compute_interference_zones( self ):
@@ -797,10 +1010,14 @@ class System:
         plt.ylabel('Latitude', labelpad=40, fontsize=8)
 
         # Get the last coverage zones map
-        current_st_id = self.st_id
+        sat = None
         if sat_name in self.geo_sat_net:
-
             sat = self.geo_sat_net[ sat_name ]
+        elif sat_name in self.ngeo_sat_net:
+            sat = self.ngeo_sat_net[ sat_name ]
+        current_st_id = self.st_id
+        if sat:
+
             # Coverage zone dict
             cov_dict = sat.coverage_data[ current_st_id ]
             # cov_dict = current_time_cov_dict[ sat_name ]
@@ -812,11 +1029,11 @@ class System:
             # Plot coverage zone contour
             basemap.plot( cov_dict[ 'LatLong' ][ :, 0 ], cov_dict[ 'LatLong' ][ :, 1 ], latlon=True, linestyle='--', label=sat_name, color='red', linewidth=1.5 )
             # Title
-            plt.title( f'Zona de cobertura - {sat_name}, Abertura: {self.cone_aperture} x {self.geo_sat_net[ sat_name ].antenna.hpbw_dg }°' )
+            plt.title( f'Zona de cobertura - {sat_name}, Abertura: {self.cone_aperture} x { sat.antenna.hpbw_dg }°' )
 
             plt.imshow( cov_dict['Cov'], extent=cov_bbox, origin='lower' )
 
-            basemap.plot( np.rad2deg( self.geo_sat_net[ sat_name ]._init_lat_lon_target_position[1] ), np.rad2deg( self.geo_sat_net[ sat_name ]._init_lat_lon_target_position[0] ), latlon=True, marker='x', label='Centro do Beam', linestyle='None', color='red', linewidth=1.5 )
+            # basemap.plot( np.rad2deg( self.geo_sat_net[ sat_name ]._init_lat_lon_target_position[1] ), np.rad2deg( self.geo_sat_net[ sat_name ]._init_lat_lon_target_position[0] ), latlon=True, marker='x', label='Centro do Beam', linestyle='None', color='red', linewidth=1.5 )
 
         plt.legend()
         plt.show()
@@ -827,13 +1044,16 @@ class System:
 
         for es in self.earth_station_net:
             es.update_position(dt)
-        for geo_sat in self.geo_sat_net:
-            geo_sat.update_position(dt)
-        for ngeo_sat in self.ngeo_sat_net:
-            ngeo_sat.update_position(dt)
+
+        for geo_s_name, geo_s in self.geo_sat_net.items():
+            geo_s.update_position(dt)
+        
+        for ngeo_s_name, ngeo_s in self.ngeo_sat_net.items():
+            ngeo_s.update_position(dt)
+
         return
 
-    def plot_system( self ):
+    def plot_system( self, vecs_exag=10000, return_fig=False ):
         """ Plot the earth station coordinates """
 
         fig = plt.figure(figsize=(10,10), dpi=80)
@@ -870,12 +1090,26 @@ class System:
             ax.scatter( *es.es_current_coords_cart, marker='+', linewidth=4, s=150, color='black' )
 
         # Plot geo satellites
-        for geo_s in self.geo_sat_net:
-            ax.scatter( *geo_s.current_coords_cart, marker='x', linewidth=4, s=150, color='blue' )
+        for geo_s_name, geo_s in self.geo_sat_net.items():
+            # Plot geo satellite
+            ax.scatter( *geo_s.current_cart, marker='x', linewidth=4, s=150, color='blue' )
+            # Plot vector basis
+            r = vecs_exag
+            ax.quiver( *geo_s.current_cart, r * geo_s._sat_vec_basis.v1.dx, r * geo_s._sat_vec_basis.v1.dy, r * geo_s._sat_vec_basis.v1.dz, color='blue')
+            ax.quiver( *geo_s.current_cart, r * geo_s._sat_vec_basis.v2.dx, r * geo_s._sat_vec_basis.v2.dy, r * geo_s._sat_vec_basis.v2.dz, color='red')
+            ax.quiver( *geo_s.current_cart, r * geo_s._sat_vec_basis.v3.dx, r * geo_s._sat_vec_basis.v3.dy, r * geo_s._sat_vec_basis.v3.dz, color='black')
+            ax.quiver( *geo_s.current_cart, r * geo_s._beam_vector_be.dx, r * geo_s._beam_vector_be.dy, r * geo_s._beam_vector_be.dz, color='green')
 
         # Plot geo satellites
-        for ngeo_s in self.ngeo_sat_net:
-            ax.scatter( *ngeo_s.current_sat_position_xyz, marker='^', linewidth=4, s=150, color='red' )
+        for ngeo_s_name, ngeo_s in self.ngeo_sat_net.items():
+            # Plot Ngeo satellite
+            ax.scatter( *(ngeo_s.sat_position_xyz[-1]), marker='^', linewidth=4, s=150, color='green' )
+            # Plot vector basis
+            r = vecs_exag / 2
+            ax.quiver( *(ngeo_s.sat_position_xyz[-1]), r * ngeo_s._sat_vec_basis.v1.dx, r * ngeo_s._sat_vec_basis.v1.dy, r * ngeo_s._sat_vec_basis.v1.dz, color='blue')
+            ax.quiver( *(ngeo_s.sat_position_xyz[-1]), r * ngeo_s._sat_vec_basis.v2.dx, r * ngeo_s._sat_vec_basis.v2.dy, r * ngeo_s._sat_vec_basis.v2.dz, color='red')
+            ax.quiver( *(ngeo_s.sat_position_xyz[-1]), r * ngeo_s._sat_vec_basis.v3.dx, r * ngeo_s._sat_vec_basis.v3.dy, r * ngeo_s._sat_vec_basis.v3.dz, color='black')
+            ax.quiver( *(ngeo_s.sat_position_xyz[-1]), r * ngeo_s._beam_vector_be.dx, r * ngeo_s._beam_vector_be.dy, r * ngeo_s._beam_vector_be.dz, color='green')
 
 
         ax.set_zlim(-PhyConstants.GEO_ORBIT_RAD_KM.value, PhyConstants.GEO_ORBIT_RAD_KM.value)
@@ -884,5 +1118,11 @@ class System:
         # ax.axis('off')
         # plt.show()
 
-        return fig
+        ret = None
+        if return_fig:
+            ret = fig
+        else:
+            plt.show()
+
+        return ret
 
