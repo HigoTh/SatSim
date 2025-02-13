@@ -8,6 +8,7 @@ import geom as ge
 from mpl_toolkits.basemap import Basemap
 import plotly.graph_objects as go
 from itertools import chain
+import shapely
 from shapely.geometry import Point
 from shapely.geometry.polygon import Polygon
 from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -15,6 +16,14 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 # -----------------------------------------------------------------------------
 # ---------------------------------- Auxiliary functions ----------------------
 # -----------------------------------------------------------------------------
+
+def sort_coordinates(list_of_xy_coords):
+    cx, cy = list_of_xy_coords.mean(0)
+    x, y = list_of_xy_coords.T
+    angles = np.arctan2(x-cx, y-cy)
+    indices = np.argsort(angles)
+    return list_of_xy_coords[indices]
+
 def sph2cart(r, el, az):
     return np.array( [ r * np.sin(el) * np.cos(az), 
                        r * np.sin(el) * np.sin(az),
@@ -88,11 +97,13 @@ class PhyConstants(Enum):
 # Classes for error handling --------------------------------------------------
 class Errors(IntEnum):
     ERROR_INVALID_EARTH_STATIONS_COORDS = 700
+    ERROR_INVALID_COV_POLYGON_SHAPE = 701
 
 class ErrorStatus:
 
     _error_msg_dict = {
-        Errors.ERROR_INVALID_EARTH_STATIONS_COORDS: 'Lista de coordenadas de estações terrestres inválida.'
+        Errors.ERROR_INVALID_EARTH_STATIONS_COORDS: 'Lista de coordenadas de estações terrestres inválida.',
+        Errors.ERROR_INVALID_COV_POLYGON_SHAPE: 'Pontos de cobertura não formam um polígono.'
     }
 
     def __init__(self, status_code: Errors, status_aux_string: str = ""):
@@ -154,6 +165,8 @@ class Earth:
         self.sphere = ge.Sphere( ge.Point( 0,0,0 ), self.earth_rad )
         # Earth reference vectorial basis
         self.vec_basis = self._get_vec_basis()
+        # World view bounding box
+        self.world_view_poly = Polygon([(-178, -88), (178, -88), (178, 88), (-178, 88), (-178, -88)])
         # Coverage zones
         self.coverage_zones = {}
 
@@ -264,7 +277,7 @@ class SatAntenna:
         self.hpbw_rad = np.deg2rad( hpbw_dg )
         self.max_gain = 2.0 - ( 2.0 / np.log2( np.cos( self.hpbw_rad ) ) )
         self.power_factor = ( self.max_gain / 2.0 ) - 1.0
-        self.vec_basis = self._get_antenna_vec_basis( beam_dir_vector )
+        self.vec_basis = self.get_antenna_vec_basis( beam_dir_vector )
 
     def ant_gain_on_direction( self, dir_vector: List[float] ):
         """ 
@@ -292,7 +305,7 @@ class SatAntenna:
         ant_gain = 0.0 if cos_th < 0.0 else ( self.max_gain * ( cos_th**( self.power_factor ) ) )
         return ant_gain
 
-    def _get_antenna_vec_basis( self, beam_dir_vector: List[float] ):
+    def get_antenna_vec_basis( self, beam_dir_vector: List[float] ):
         """Calculates the vector basis of the antenna.
         Returns:
             vec_basis (VecBasis): Vector basis.
@@ -422,9 +435,12 @@ class GeoSatellite:
         # Update the beam vector 
         cart_p = sph2cart(1.0, el, az)
 
-        self._beam_vector_be = cart_p[ 0 ] * self._sat_vec_basis.v1 + \
+        self._beam_vector_be = ge.Vector( cart_p[ 0 ] * self._sat_vec_basis.v1 + \
             cart_p[ 1 ] * self._sat_vec_basis.v2 + \
-            cart_p[ 2 ] * self._sat_vec_basis.v3
+            cart_p[ 2 ] * self._sat_vec_basis.v3 ).norm()
+
+        self.antenna.beam_direction_vector = self._beam_vector_be
+        self.antenna.vec_basis = self.antenna.get_antenna_vec_basis( self._beam_vector_be.asarray() )
 
         return
 
@@ -634,6 +650,9 @@ class NGeoSatellite:
             cart_p[ 1 ] * self._sat_vec_basis.v2 + \
             cart_p[ 2 ] * self._sat_vec_basis.v3
 
+        self.antenna.beam_direction_vector = self._beam_vector_be
+        self.antenna.vec_basis = self.antenna.get_antenna_vec_basis( self._beam_vector_be.asarray() )
+
         return
 
     def _compute_line_of_nodes( self ):
@@ -792,6 +811,13 @@ class System:
 
     # Angular resolution of rays in the elevation domain
     cone_el_angle_resol = np.pi / 1000.0
+    # Maximum area threshold
+    area_th = 360 * 180 / 4
+    # Grid resolution
+    grid_resol = 500
+    # Space thresholds
+    x_th = 358
+    y_th = 178
 
     def __init__(self, 
                  earth: Earth, 
@@ -819,21 +845,12 @@ class System:
             and the demarcation of coverage areas.
         """
 
-        # Dictionary with the relationship between satellite and coverage area on Earth
-        sat_cov_dict = {}
-        cov_poly = {}
         # Interaction on Geo satellites
         for geo_sat_name, geo_sat in self.geo_sat_net.items():
 
             aux_list = []
             # Ray origin
             ray_origin = ge.Point( *geo_sat.current_cart )
-            sat2earthc_vec = ge.Point( 0,0,0 ) - ray_origin
-
-            # Satellite to earth center distance
-            sat2earth_dist = ge.length( sat2earthc_vec )
-            # Earth radius
-            earth_rad = self.earth.earth_rad
 
             # El-Az angles of the cone
             max_cone_aperture = self.cone_aperture * geo_sat.antenna.hpbw_rad
@@ -856,55 +873,74 @@ class System:
 
             geo_sat.coverage_data[ self.st_id ] = {}
             geo_sat.coverage_data[ self.st_id ][ 'Array' ] = np.array( aux_list )
-            geo_sat.coverage_data[ self.st_id ][ 'LatLong' ] = np.rad2deg( cart_2_ll( np.array( aux_list ) ) )
-            geo_sat.coverage_data[ self.st_id ][ 'Poly' ] = Polygon( geo_sat.coverage_data[ self.st_id ][ 'LatLong' ] )
+            geo_sat.coverage_data[ self.st_id ][ 'LatLong' ] = sort_coordinates( np.rad2deg( cart_2_ll( np.array( aux_list ) ) ) )
+            # Compensate for Earth's rotation
+            dg = PhyConstants.EARTH_ANG_RATE_ROT_DG.value * self.time[ -1 ]
+            dr = PhyConstants.EARTH_ANG_RATE_ROT_RAD.value * self.time[ -1 ]
+            geo_sat.coverage_data[ self.st_id ][ 'LatLong' ][ :, 0 ] = geo_sat.coverage_data[ self.st_id ][ 'LatLong' ][ :, 0 ] - dg
 
-            minx, maxx = min(geo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,0]), max(geo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,0])
-            miny, maxy = min(geo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,1]), max(geo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,1])
-            nd = 500
+            # Corrige deslocamento
+            fx = False
+            fy = False
+            cov = geo_sat.coverage_data[ self.st_id ][ 'LatLong' ]
+            x_range = np.max( cov[ :, 0 ] ) - np.min( cov[ :, 0 ] )
+            y_range = np.max( cov[ :, 1 ] ) - np.min( cov[ :, 1 ] )
+            if np.any( x_range >= self.x_th  ):
+                fx = True
+                geo_sat.coverage_data[ self.st_id ][ 'LatLong' ][ cov[ :, 0 ] < 0.0, 0 ] = cov[ cov[ :, 0 ] < 0.0, 0 ] + 360
+            if np.any( y_range >= self.y_th ):
+                fy = False
+                geo_sat.coverage_data[ self.st_id ][ 'LatLong' ][ cov[ :, 1 ] < 0.0, 1 ] = cov[ cov[ :, 1 ] < 0.0, 1 ] + 180
+            geo_sat.coverage_data[ self.st_id ][ 'LatLong' ] = sort_coordinates( geo_sat.coverage_data[ self.st_id ][ 'LatLong' ] )
+
+
+
+            # Get polygon
+            poly = Polygon( geo_sat.coverage_data[ self.st_id ][ 'LatLong' ] )
+            geo_sat.coverage_data[ self.st_id ][ 'Poly' ] = poly
+
+            # Earth rotation matrix
+            rot_matrix = self.earth._get_rotation_mat( dr )
+
+            # Bounding box
+            minx, miny, maxx, maxy = -180, -90, 180, 90
+            geo_sat.coverage_data[ self.st_id ][ 'Cov' ] = np.nan * np.ones(shape=( self.grid_resol, self.grid_resol ))
+            geo_sat.coverage_data[ self.st_id ][ 'PFD' ] = np.nan * np.ones(shape=( self.grid_resol, self.grid_resol ))
             # Long
-            xv = np.linspace( minx, maxx, nd)
+            xv = np.linspace( minx, maxx, self.grid_resol )
             # Lat
-            yv = np.linspace( miny, maxy, nd)
-            coverage = np.ones( (nd,nd) )
-            pfd = np.ones( (nd,nd) )
-            coverage[:] = np.nan
-            pfd[:] = np.nan
+            yv = np.linspace( miny, maxy, self.grid_resol )
+            # Compute coverages
             for i, x in enumerate(xv):
                 for j, y in enumerate(yv):
 
-                    if geo_sat.coverage_data[ self.st_id ][ 'Poly' ].contains( Point( x, y ) ):
+                    # Shift in case of polygon rotation
+                    xp = x + 360 if ( x < 0.0 and fx is True ) else x
+                    yp = y + 180 if ( y < 0.0 and fy is True ) else y
+
+                    if poly.contains( Point( xp, yp ) ):
 
                         # Convert to spherical
                         az, el = latlong2azel( np.deg2rad( y ), np.deg2rad( x ) )
-                        es_point = ge.Point( *sph2cart( self.earth.earth_rad, el, az) )
+                        es_point = ge.Point( *np.matmul( rot_matrix, np.array( sph2cart( self.earth.earth_rad, el, az) ) ) )
+
                         # Compute the distance
                         sat_to_point_vec = es_point - ray_origin
                         sat_to_point_dist = ge.length( sat_to_point_vec ) * 1000
 
                         # Antenna Gains
                         tx_ant_gain = geo_sat.antenna.ant_gain_on_direction( sat_to_point_vec )
-                        coverage[ j, i ] = 10.0 * np.log10( tx_ant_gain * geo_sat.tx_power * ( self.wavelength / ( 4.0 * np.pi * sat_to_point_dist ) )**2 )
-                        pfd[ j, i ] = 10.0 * np.log10( tx_ant_gain * geo_sat.tx_power * ( 1.0 / ( 4.0 * np.pi * sat_to_point_dist**2 ) ) )
+                        geo_sat.coverage_data[ self.st_id ][ 'Cov' ][ j, i ] = \
+                            10.0 * np.log10( tx_ant_gain * geo_sat.tx_power * ( self.wavelength / ( 4.0 * np.pi * sat_to_point_dist ) )**2 )
+                        geo_sat.coverage_data[ self.st_id ][ 'PFD' ][ j, i ] = \
+                            10.0 * np.log10( tx_ant_gain * geo_sat.tx_power * ( 1.0 / ( 4.0 * np.pi * sat_to_point_dist**2 ) ) )
 
-            geo_sat.coverage_data[ self.st_id ][ 'Cov' ] = coverage
-            geo_sat.coverage_data[ self.st_id ][ 'PFD' ] = pfd
-            geo_sat.coverage_data[ self.st_id ][ 'X_axis' ] = xv
-            geo_sat.coverage_data[ self.st_id ][ 'Y_axis' ] = yv
-
-
-        # Interaction on Geo satellites
+        # Interaction on NGeo satellites
         for ngeo_sat_name, ngeo_sat in self.ngeo_sat_net.items():
 
             aux_list = []
             # Ray origin
             ray_origin = ge.Point( *ngeo_sat.sat_position_xyz[ -1 ] )
-            sat2earthc_vec = ge.Point( 0,0,0 ) - ray_origin
-
-            # Satellite to earth center distance
-            sat2earth_dist = ge.length( sat2earthc_vec )
-            # Earth radius
-            earth_rad = self.earth.earth_rad
 
             # El-Az angles of the cone
             max_cone_aperture = self.cone_aperture * ngeo_sat.antenna.hpbw_rad
@@ -928,23 +964,42 @@ class System:
             ngeo_sat.coverage_data[ self.st_id ] = {}
             ngeo_sat.coverage_data[ self.st_id ][ 'Array' ] = np.array( aux_list )
             ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ] = np.rad2deg( cart_2_ll( np.array( aux_list ) ) )
-            ngeo_sat.coverage_data[ self.st_id ][ 'Poly' ] = Polygon( ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ] )
 
-            minx, maxx = min(ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,0]), max(ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,0])
-            miny, maxy = min(ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,1]), max(ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ][:,1])
-            nd = 500
+            # Corrige deslocamento
+            fx = False
+            fy = False
+            cov = ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ]
+            x_range = np.max( cov[ :, 0 ] ) - np.min( cov[ :, 0 ] )
+            y_range = np.max( cov[ :, 1 ] ) - np.min( cov[ :, 1 ] )
+            if np.any( x_range >= self.x_th  ):
+                fx = True
+                ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ][ cov[ :, 0 ] < 0.0, 0 ] = cov[ cov[ :, 0 ] < 0.0, 0 ] + 360
+            if np.any( y_range >= self.y_th ):
+                fy = False
+                ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ][ cov[ :, 1 ] < 0.0, 1 ] = cov[ cov[ :, 1 ] < 0.0, 1 ] + 180
+            ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ] = sort_coordinates( ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ] )
+
+            # Get polygon
+            poly = Polygon( ngeo_sat.coverage_data[ self.st_id ][ 'LatLong' ] )
+            ngeo_sat.coverage_data[ self.st_id ][ 'Poly' ] = poly
+
+            # Bounding box
+            minx, miny, maxx, maxy = -180, -90, 180, 90
+            ngeo_sat.coverage_data[ self.st_id ][ 'Cov' ] = np.nan * np.ones(shape=( self.grid_resol, self.grid_resol ))
+            ngeo_sat.coverage_data[ self.st_id ][ 'PFD' ] = np.nan * np.ones(shape=( self.grid_resol, self.grid_resol ))
             # Long
-            xv = np.linspace( minx, maxx, nd)
+            xv = np.linspace( minx, maxx, self.grid_resol )
             # Lat
-            yv = np.linspace( miny, maxy, nd)
-            coverage = np.ones( (nd,nd) )
-            pfd = np.ones( (nd,nd) )
-            coverage[:] = np.nan
-            pfd[:] = np.nan
+            yv = np.linspace( miny, maxy, self.grid_resol )
+            # Compute coverages
             for i, x in enumerate(xv):
                 for j, y in enumerate(yv):
 
-                    if ngeo_sat.coverage_data[ self.st_id ][ 'Poly' ].contains( Point( x, y ) ):
+                    # Shift in case of polygon rotation
+                    xp = x + 360 if ( x < 0.0 and fx is True ) else x
+                    yp = y + 180 if ( y < 0.0 and fy is True ) else y
+
+                    if poly.contains( Point( xp, yp ) ):
 
                         # Convert to spherical
                         az, el = latlong2azel( np.deg2rad( y ), np.deg2rad( x ) )
@@ -955,15 +1010,13 @@ class System:
 
                         # Antenna Gains
                         tx_ant_gain = ngeo_sat.antenna.ant_gain_on_direction( sat_to_point_vec )
-                        coverage[ j, i ] = 10.0 * np.log10( tx_ant_gain * ngeo_sat.tx_power * ( self.wavelength / ( 4.0 * np.pi * sat_to_point_dist ) )**2 )
-                        pfd[ j, i ] = 10.0 * np.log10( tx_ant_gain * ngeo_sat.tx_power * ( 1.0 / ( 4.0 * np.pi * sat_to_point_dist**2 ) ) )
+                        ngeo_sat.coverage_data[ self.st_id ][ 'Cov' ][ j, i ] = \
+                            10.0 * np.log10( tx_ant_gain * ngeo_sat.tx_power * ( self.wavelength / ( 4.0 * np.pi * sat_to_point_dist ) )**2 )
+                        ngeo_sat.coverage_data[ self.st_id ][ 'PFD' ][ j, i ] = \
+                            10.0 * np.log10( tx_ant_gain * ngeo_sat.tx_power * ( 1.0 / ( 4.0 * np.pi * sat_to_point_dist**2 ) ) )
 
-            ngeo_sat.coverage_data[ self.st_id ][ 'Cov' ] = coverage
-            ngeo_sat.coverage_data[ self.st_id ][ 'PFD' ] = pfd
-            ngeo_sat.coverage_data[ self.st_id ][ 'X_axis' ] = xv
-            ngeo_sat.coverage_data[ self.st_id ][ 'Y_axis' ] = yv
-
-        return sat_cov_dict
+ 
+        return
 
     # def compute_interference_zones( self ):
 
@@ -1020,29 +1073,51 @@ class System:
         current_st_id = self.st_id
         if sat:
 
-            # Coverage zone dict
-            cov_dict = sat.coverage_data[ current_st_id ]
-            # cov_dict = current_time_cov_dict[ sat_name ]
-            # Coverage bounding box
-            cov_bbox = cov_dict[ 'X_axis' ][ 0 ], cov_dict[ 'X_axis' ][ -1 ], cov_dict[ 'Y_axis' ][ 0 ], cov_dict[ 'Y_axis' ][ -1 ]
-            # Coverage zone polygon
-            xs, ys = cov_dict[ 'Poly' ].exterior.xy  
-            # plt.fill(xs, ys, alpha=0.4, fc='r', ec='none')
-            # Plot coverage zone contour
-            basemap.plot( cov_dict[ 'LatLong' ][ :, 0 ], cov_dict[ 'LatLong' ][ :, 1 ], latlon=True, linestyle='--', label=sat_name, color='red', linewidth=1.5 )
             # Title
             plt.title( f'Zona de cobertura - {sat_name}, Abertura: {self.cone_aperture} x { sat.antenna.hpbw_dg }°' )
-            # Legenda
-            plt.legend()
+            # Coverage zone dict
+            cov_dict = sat.coverage_data[ current_st_id ]
+
+            # Contour mask
+            c_mask = np.zeros( cov_dict['Cov'].shape, dtype=bool )
+            # False para os valores abaixo do limiar
+            c_mask[ ~np.isnan( cov_dict['Cov'] ) ] = True
+            c_mask[ np.isnan( cov_dict['Cov'] ) ] = False
+            
+            # Coverage bounding box
+            cov_bbox = -180, 180, -90, 90
+            # Plotar contorno
+            plt.contour(c_mask, [0.5], colors="red", linewidths=1, extent=cov_bbox, linestyles='dashed' )
+            # plt.legend()
             # Mapa de calor
             im = plt.imshow( cov_dict['Cov'], extent=cov_bbox, origin='lower' )
             # Barra de cores
             divider = make_axes_locatable(ax)
             cax = divider.append_axes("right", size="2%", pad=0.5)
             plt.colorbar(im, cax=cax)
-            # basemap.plot( np.rad2deg( self.geo_sat_net[ sat_name ]._init_lat_lon_target_position[1] ), np.rad2deg( self.geo_sat_net[ sat_name ]._init_lat_lon_target_position[0] ), latlon=True, marker='x', label='Centro do Beam', linestyle='None', color='red', linewidth=1.5 )
 
-        
+            # for ip in range(0, len( cov_dict[ 'Poly' ] ) ):
+
+            #     # Coverage bounding box
+            #     cov_bbox = cov_dict[ 'BBox' ][ ip ]
+            #     # Coverage zone polygon
+            #     xs, ys = cov_dict[ 'Poly' ][ ip ].exterior.xy 
+            #     # Plot coverage zone contour
+            #     basemap.plot( cov_dict[ 'LatLong' ][ :, 0 ], cov_dict[ 'LatLong' ][ :, 1 ], latlon=True, linestyle='--', label=sat_name, color='red', linewidth=1.5 )
+            #     # Legenda
+            #     plt.legend()
+            #     # Mapa de calor
+            #     im = plt.imshow( cov_dict['Cov'][ip], extent=cov_bbox, origin='lower' )
+            #     # basemap.plot( np.rad2deg( self.geo_sat_net[ sat_name ]._init_lat_lon_target_position[1] ), np.rad2deg( self.geo_sat_net[ sat_name ]._init_lat_lon_target_position[0] ), latlon=True, marker='x', label='Centro do Beam', linestyle='None', color='red', linewidth=1.5 )
+
+            #     # Barra de cores
+            #     divider = make_axes_locatable(ax)
+            #     cax = divider.append_axes("right", size="2%", pad=0.5)
+            #     plt.colorbar(im, cax=cax)
+
+
+
+
         plt.show()
 
         return
@@ -1057,6 +1132,12 @@ class System:
         
         for ngeo_s_name, ngeo_s in self.ngeo_sat_net.items():
             ngeo_s.update_position(dt)
+
+        # Increment time and state
+        self.time.append( self.time[ -1 ] + dt )
+        self.st_id = self.st_id + 1
+        # Compute coverage zones
+        self.compute_coverage_zones()
 
         return
 
