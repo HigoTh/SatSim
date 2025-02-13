@@ -845,6 +845,13 @@ class System:
             and the demarcation of coverage areas.
         """
 
+        # Compensate for Earth's rotation
+        dg = PhyConstants.EARTH_ANG_RATE_ROT_DG.value * self.time[ -1 ]
+        dr = PhyConstants.EARTH_ANG_RATE_ROT_RAD.value * self.time[ -1 ]
+        # Earth rotation matrix
+        rot_matrix = self.earth._get_rotation_mat( dr )
+        rot_matrix_m = self.earth._get_rotation_mat( -dr )
+
         # Interaction on Geo satellites
         for geo_sat_name, geo_sat in self.geo_sat_net.items():
 
@@ -868,16 +875,12 @@ class System:
                     # Intersection point
                     intersection_point = self.earth.sphere.intersect( ray )
                     if intersection_point is not None:
-                        aux_list.append( intersection_point.asarray() )
+                        aux_list.append( np.matmul( rot_matrix_m, intersection_point.asarray() ) )
                         break
 
             geo_sat.coverage_data[ self.st_id ] = {}
             geo_sat.coverage_data[ self.st_id ][ 'Array' ] = np.array( aux_list )
             geo_sat.coverage_data[ self.st_id ][ 'LatLong' ] = sort_coordinates( np.rad2deg( cart_2_ll( np.array( aux_list ) ) ) )
-            # Compensate for Earth's rotation
-            dg = PhyConstants.EARTH_ANG_RATE_ROT_DG.value * self.time[ -1 ]
-            dr = PhyConstants.EARTH_ANG_RATE_ROT_RAD.value * self.time[ -1 ]
-            geo_sat.coverage_data[ self.st_id ][ 'LatLong' ][ :, 0 ] = geo_sat.coverage_data[ self.st_id ][ 'LatLong' ][ :, 0 ] - dg
 
             # Corrige deslocamento
             fx = False
@@ -893,16 +896,12 @@ class System:
                 geo_sat.coverage_data[ self.st_id ][ 'LatLong' ][ cov[ :, 1 ] < 0.0, 1 ] = cov[ cov[ :, 1 ] < 0.0, 1 ] + 180
             geo_sat.coverage_data[ self.st_id ][ 'LatLong' ] = sort_coordinates( geo_sat.coverage_data[ self.st_id ][ 'LatLong' ] )
 
-
-
             # Get polygon
             poly = Polygon( geo_sat.coverage_data[ self.st_id ][ 'LatLong' ] )
             geo_sat.coverage_data[ self.st_id ][ 'Poly' ] = poly
 
-            # Earth rotation matrix
-            rot_matrix = self.earth._get_rotation_mat( dr )
-
             # Bounding box
+            minx_p, miny_p, maxx_p, maxy_p = poly.bounds
             minx, miny, maxx, maxy = -180, -90, 180, 90
             geo_sat.coverage_data[ self.st_id ][ 'Cov' ] = np.nan * np.ones(shape=( self.grid_resol, self.grid_resol ))
             geo_sat.coverage_data[ self.st_id ][ 'PFD' ] = np.nan * np.ones(shape=( self.grid_resol, self.grid_resol ))
@@ -918,22 +917,23 @@ class System:
                     xp = x + 360 if ( x < 0.0 and fx is True ) else x
                     yp = y + 180 if ( y < 0.0 and fy is True ) else y
 
-                    if poly.contains( Point( xp, yp ) ):
+                    if ( minx_p <= xp <= maxx_p ) and ( miny_p <= yp <= maxy_p ):
+                        if poly.contains( Point( xp, yp ) ):
 
-                        # Convert to spherical
-                        az, el = latlong2azel( np.deg2rad( y ), np.deg2rad( x ) )
-                        es_point = ge.Point( *np.matmul( rot_matrix, np.array( sph2cart( self.earth.earth_rad, el, az) ) ) )
+                            # Convert to spherical
+                            az, el = latlong2azel( np.deg2rad( y ), np.deg2rad( x ) )
+                            es_point = ge.Point( *np.matmul( rot_matrix, np.array( sph2cart( self.earth.earth_rad, el, az) ) ) )
 
-                        # Compute the distance
-                        sat_to_point_vec = es_point - ray_origin
-                        sat_to_point_dist = ge.length( sat_to_point_vec ) * 1000
+                            # Compute the distance
+                            sat_to_point_vec = es_point - ray_origin
+                            sat_to_point_dist = ge.length( sat_to_point_vec ) * 1000
 
-                        # Antenna Gains
-                        tx_ant_gain = geo_sat.antenna.ant_gain_on_direction( sat_to_point_vec )
-                        geo_sat.coverage_data[ self.st_id ][ 'Cov' ][ j, i ] = \
-                            10.0 * np.log10( tx_ant_gain * geo_sat.tx_power * ( self.wavelength / ( 4.0 * np.pi * sat_to_point_dist ) )**2 )
-                        geo_sat.coverage_data[ self.st_id ][ 'PFD' ][ j, i ] = \
-                            10.0 * np.log10( tx_ant_gain * geo_sat.tx_power * ( 1.0 / ( 4.0 * np.pi * sat_to_point_dist**2 ) ) )
+                            # Antenna Gains
+                            tx_ant_gain = geo_sat.antenna.ant_gain_on_direction( sat_to_point_vec )
+                            geo_sat.coverage_data[ self.st_id ][ 'Cov' ][ j, i ] = \
+                                10.0 * np.log10( tx_ant_gain * geo_sat.tx_power * ( self.wavelength / ( 4.0 * np.pi * sat_to_point_dist ) )**2 )
+                            geo_sat.coverage_data[ self.st_id ][ 'PFD' ][ j, i ] = \
+                                10.0 * np.log10( tx_ant_gain * geo_sat.tx_power * ( 1.0 / ( 4.0 * np.pi * sat_to_point_dist**2 ) ) )
 
         # Interaction on NGeo satellites
         for ngeo_sat_name, ngeo_sat in self.ngeo_sat_net.items():
@@ -958,7 +958,7 @@ class System:
                     # Intersection point
                     intersection_point = self.earth.sphere.intersect( ray )
                     if intersection_point is not None:
-                        aux_list.append( intersection_point.asarray() )
+                        aux_list.append( np.matmul( rot_matrix_m, intersection_point.asarray() ) )
                         break
 
             ngeo_sat.coverage_data[ self.st_id ] = {}
@@ -984,6 +984,7 @@ class System:
             ngeo_sat.coverage_data[ self.st_id ][ 'Poly' ] = poly
 
             # Bounding box
+            minx_p, miny_p, maxx_p, maxy_p = poly.bounds
             minx, miny, maxx, maxy = -180, -90, 180, 90
             ngeo_sat.coverage_data[ self.st_id ][ 'Cov' ] = np.nan * np.ones(shape=( self.grid_resol, self.grid_resol ))
             ngeo_sat.coverage_data[ self.st_id ][ 'PFD' ] = np.nan * np.ones(shape=( self.grid_resol, self.grid_resol ))
@@ -999,21 +1000,22 @@ class System:
                     xp = x + 360 if ( x < 0.0 and fx is True ) else x
                     yp = y + 180 if ( y < 0.0 and fy is True ) else y
 
-                    if poly.contains( Point( xp, yp ) ):
+                    if ( minx_p <= xp <= maxx_p ) and ( miny_p <= yp <= maxy_p ):
+                        if poly.contains( Point( xp, yp ) ):
 
-                        # Convert to spherical
-                        az, el = latlong2azel( np.deg2rad( y ), np.deg2rad( x ) )
-                        es_point = ge.Point( *sph2cart( self.earth.earth_rad, el, az) )
-                        # Compute the distance
-                        sat_to_point_vec = es_point - ray_origin
-                        sat_to_point_dist = ge.length( sat_to_point_vec ) * 1000
+                            # Convert to spherical
+                            az, el = latlong2azel( np.deg2rad( y ), np.deg2rad( x ) )
+                            es_point = ge.Point( *np.matmul( rot_matrix, np.array( sph2cart( self.earth.earth_rad, el, az) ) ) )
+                            # Compute the distance
+                            sat_to_point_vec = es_point - ray_origin
+                            sat_to_point_dist = ge.length( sat_to_point_vec ) * 1000
 
-                        # Antenna Gains
-                        tx_ant_gain = ngeo_sat.antenna.ant_gain_on_direction( sat_to_point_vec )
-                        ngeo_sat.coverage_data[ self.st_id ][ 'Cov' ][ j, i ] = \
-                            10.0 * np.log10( tx_ant_gain * ngeo_sat.tx_power * ( self.wavelength / ( 4.0 * np.pi * sat_to_point_dist ) )**2 )
-                        ngeo_sat.coverage_data[ self.st_id ][ 'PFD' ][ j, i ] = \
-                            10.0 * np.log10( tx_ant_gain * ngeo_sat.tx_power * ( 1.0 / ( 4.0 * np.pi * sat_to_point_dist**2 ) ) )
+                            # Antenna Gains
+                            tx_ant_gain = ngeo_sat.antenna.ant_gain_on_direction( sat_to_point_vec )
+                            ngeo_sat.coverage_data[ self.st_id ][ 'Cov' ][ j, i ] = \
+                                10.0 * np.log10( tx_ant_gain * ngeo_sat.tx_power * ( self.wavelength / ( 4.0 * np.pi * sat_to_point_dist ) )**2 )
+                            ngeo_sat.coverage_data[ self.st_id ][ 'PFD' ][ j, i ] = \
+                                10.0 * np.log10( tx_ant_gain * ngeo_sat.tx_power * ( 1.0 / ( 4.0 * np.pi * sat_to_point_dist**2 ) ) )
 
  
         return
