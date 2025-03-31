@@ -1044,7 +1044,7 @@ class System:
     #             return int_poly.convex_hull
 
 
-    def plot_current_coverage_zone( self, sat_name: str ):
+    def plot_current_coverage_zone( self, sat_name: str, return_fig: bool = False ):
 
         # Plot earth basemap
         fig = plt.figure(figsize=(12, 10), edgecolor='w')
@@ -1117,12 +1117,18 @@ class System:
             #     cax = divider.append_axes("right", size="2%", pad=0.5)
             #     plt.colorbar(im, cax=cax)
 
+        
+        ret = None
+        if return_fig:
+            ret = fig
+            plt.close()
+        else:
+            plt.show()
+            
 
+        # plt.show()
 
-
-        plt.show()
-
-        return
+        return ret
 
     def update_system( self, dt: float ):
 
@@ -1213,6 +1219,7 @@ class System:
             ret = fig
         else:
             plt.show()
+            
 
         return ret
 
